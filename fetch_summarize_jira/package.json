@@ -1,0 +1,13 @@
+{
+    "name" : "fetch_summarize_jira",
+    "version" : "1.0.0",
+    "description" : "Fetch and summarize Jira issues",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "run" : "node index.js"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
