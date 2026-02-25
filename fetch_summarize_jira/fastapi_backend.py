@@ -127,4 +127,138 @@ async def fetch_jira_issue(issue_key: str) -> Dict[str, Any]:
             ],
             "url": f"{JIRA_BASE_URL}/browse/{issue_key}"
         }
+    
+async def llm_summarize_issue(issue_data: Dict[str, Any]) -> Dict[str, Any]:
+    #Generates a summary of a Jira issue using an LLM. It constructs a prompt based on the issue data and optional context 
+    # configuration, then sends this prompt to the OpenAI API to obtain a summary. The function returns the generated summary 
+    # as a string.
+    if not openai_client:
+        return {
+                "summary": f"{issue_data['key']} is {issue_data['status']} with priority {issue_data['priority']}.",
+                "root_cause": "OpenAI key not configured; LLM analysis unavailable.",
+                "confidence": "low",
+                "evidence": [issue_data["key"]]
+            }
         
+    payload = {
+            "key" : issue_data["key"],
+            "summary": issue_data["summary"],
+            "status": issue_data["status"],
+            "priority": issue_data["priority"],
+            "description": issue_data["description"],
+            "comments": issue_data["comments"],
+        }
+
+    prompt = (
+            "You are a senior triage engineer.\n"
+            "Analyze this Jira issues and comments\n"
+            "Return strict JSON with keys: summary, root_cause, confidence, evidence\n"
+            "Confidence must be one of low, medium, high based on how certain you are about the root cause\n"
+            "evidence short list of concrete clues from description and comments \n"
+            f"DATA: \n{json.dumps(payload, ensure_ascii=False)}\n"
+        )
+
+    response = await with_retry(
+            lambda: openai_client.responses.create(
+                model=OPENAI_MODEL,
+                input=prompt,
+                max_output_tokens=700
+            )
+        )
+
+    text = (response.output_text or "").strip()
+    try:
+        cleaned = text.replace("```json", "").replace("```", "").strip()
+        obj = json.loads(cleaned)
+        return {
+                "summary": obj.get("summary", ""),
+                "root_cause": obj.get("root_cause", ""),
+                "confidence": obj.get("confidence", "low"),
+                "evidence": obj.get("evidence", [])
+            }
+    except Exception:
+        return {
+                "summary": text or "LLM parse failed.",
+                "root_cause": "Unable to parse structured root cause from model output.",
+                "confidence": "low",
+                "evidence": [issue_data["key"]]
+            }
+        
+#-----------------------------
+# API Endpoints
+#-----------------------------
+@app.get("/health")
+async def health():
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@app.get("v1/tools")
+async def list_tools():
+    return {
+        "success": True,
+        "tools": [
+            {
+                "name": "fetch_jira",
+                "description": "Fetches one JIRA issue with comments.",
+                "parameters": {
+                    "issue_key": "string(e.g., SYSCROS-156171)"
+                }
+            },
+            {
+                "name": "fetch_and_summarize",
+                "description": "Fetches a Jira issue and generates a summary/root cause using an LLM.",
+                "parameters": {
+                    "issue_key": "string(e.g., SYSCROS-156171)"
+                }
+            }
+        ]
+    }
+        
+@app.post("/v1/tools/call", response_model=ToolCallResponse)
+async def call_tool(request: ToolCallRequest, x_internal_token: Optional[str] = Header(default=None)):
+    start = datetime.now().timestamp()
+
+    if INTERNAL_API_TOKEN and x_internal_token != INTERNAL_API_TOKEN:
+        return ToolCallResponse(
+            success=False, 
+            tool_name=request.tool_name, 
+            error="Unauthorized",
+            execution_time = datetime.now().timestamp() - start
+        )
+    
+    try:
+        issue_key = request.parameters.get("issue_key")
+        if not issue_key:
+            raise ValueError("Missing required parameter: issue_key")
+        if request.tool_name == "fetch_jira":
+            issue = await fetch_jira_issue(issue_key)
+            return ToolCallResponse(
+                success=True, 
+                tool_name= request.tool_name,
+                result=issue,
+                execution_time = datetime.now().timestamp() - start
+            )
+        
+        if request.tool_name == "fetch_and_summarize":
+            issue = await fetch_jira_issue(issue_key)
+            summary = await llm_summarize_issue(issue)
+            result = {
+                "fetched_at" : datetime.now(timezone.utc).isoformat(),
+                "issue": issue,
+                "analysis": summary
+            }
+            return ToolCallResponse(
+                success=True, 
+                tool_name= request.tool_name,
+                result=result,
+                execution_time = datetime.now().timestamp() - start
+            )
+        
+        raise ValueError(f"Unknown tool: {request.tool_name}")
+    
+    except Exception as e:
+        return ToolCallResponse(
+            success=False, 
+            tool_name=request.tool_name, 
+            error=str(e),
+            execution_time = datetime.now().timestamp() - start
+        )
