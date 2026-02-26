@@ -1,6 +1,8 @@
 import os
+import json as pyjson
 import time 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import List, Literal, Optional, Dict, Any
 
@@ -15,6 +17,22 @@ from openai import AsyncOpenAI
 JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "").rstrip("/")
 JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
+
+
+# Always load Jira credentials from credentials.json, ADA-style
+cred_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "credentials.json"))
+if os.path.exists(cred_path):
+    with open(cred_path, "r", encoding="utf-8") as f:
+        creds = pyjson.load(f)
+    jira_creds = creds.get("jira") or {}
+    JIRA_EMAIL = jira_creds.get("username", JIRA_EMAIL)
+    JIRA_API_TOKEN = jira_creds.get("password", JIRA_API_TOKEN)
+    # Optionally allow JIRA_BASE_URL from credentials.json if present
+    if not JIRA_BASE_URL:
+        JIRA_BASE_URL = creds.get("jira", {}).get("base_url", "").rstrip("/")
+    # Fallback to .env default if still missing
+    if not JIRA_BASE_URL:
+        JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "").rstrip("/")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
@@ -35,6 +53,7 @@ class ToolCallResponse(BaseModel):
     tool_name: str
     result:Optional[Any] = None
     error: Optional[str] = None
+    execution_time: Optional[float] = None
 
 #-----------------------------
 #Helpers
@@ -103,7 +122,7 @@ async def fetch_jira_issue(issue_key: str) -> Dict[str, Any]:
             raise HTTPException(status_code=comment_response.status_code, detail=f"Failed to fetch comments: {comment_response.text}")
 
         issue = issue_response.json()
-        comments = comment_response.json()
+        comments = comment_response.json().get("comments", [])
 
         f = issue.get("fields", {})
         return {
@@ -191,7 +210,7 @@ async def llm_summarize_issue(issue_data: Dict[str, Any]) -> Dict[str, Any]:
 async def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
-@app.get("v1/tools")
+@app.get("/v1/tools")
 async def list_tools():
     return {
         "success": True,
